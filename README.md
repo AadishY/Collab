@@ -60,7 +60,14 @@ A single toggle that cuts rendering time by **2.5× to 3×** while strictly pres
 - The engine automatically verifies and launches the backend server in the background if it is offline.
 - Automatic VRAM cache purging (`purge_backend_memory()`) prevents CUDA Out-Of-Memory errors.
 
-### 5. 📸 Live Visual Image Previews
+### 5. 🎚️ Sampler & Scheduler Dropdown Controls
+Every generation cell now includes interactive dropdowns for sampling algorithms and noise schedules:
+- **Default Sampler:** `euler` (standard, high stability)
+- **Advanced Sampler:** `er_sde` (extended stochastic SDE solver for enhanced textural micro-detail), along with `euler_ancestral`, `dpmpp_2m`, `dpmpp_sde`, `dpmpp_2m_sde`, `heun`, `ddim`, `uni_pc`.
+- **Default Scheduler:** `simple` (standard, stable)
+- **Alternative Schedulers:** `beta` (smooth noise schedule recommended for modern diffusion models), `normal`, `karras`, `exponential`, `sgm_uniform`, `ddim_uniform`.
+
+### 6. 📸 Live Visual Image Previews
 - Before generation begins, input images are displayed in clean side-by-side comparison cards with source dimensions and aspect ratio tags.
 - Output images are rendered at full resolution and saved locally to `/content/output/`.
 
