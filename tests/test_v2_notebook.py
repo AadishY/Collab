@@ -24,7 +24,7 @@ def source(cell):
 
 
 def make_utils(notebook):
-    setup = source(notebook['cells'][2])
+    setup = next(source(c) for c in notebook['cells'] if source(c).startswith('# @title 1.'))
     line = next(line for line in setup.splitlines() if line.startswith('SHARED_UTILS_CODE = '))
     code = ast.literal_eval(line.split(' = ', 1)[1])
     module = types.ModuleType('qwen_studio_utils')
@@ -49,16 +49,111 @@ class NotebookTests(unittest.TestCase):
         self.assertFalse(any('Text-to-Image Generation' in title for title in titles))
         self.assertTrue(any('Multi-Image Editing' in title for title in titles))
 
-    def test_civit_preset_downloads_pinned_version_without_lookup(self):
+    def test_anything2real_downloads_from_supplied_google_drive_link(self):
+        u = self.utils
+        gdown = types.ModuleType('gdown')
+        gdown.download = mock.Mock(return_value='/tmp/downloaded')
+        link = 'https://drive.google.com/file/d/1RA3DwpCE7ztEYl2cd4XAYJ2lm6-D_LSI/view?usp=sharing'
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.dict(sys.modules, {'gdown': gdown}), \
+             mock.patch.object(u, 'verify_safetensors_file', side_effect=[(False, 0, 'missing'), (True, 304, 'ok')]), \
+             mock.patch.object(u.subprocess, 'run') as aria:
+            u.download_lora_multisource(u.PRESET_LORA_REGISTRY[u.CIVIT_ANYTHING2REAL_LORA_FILE]['url'], tmp, u.CIVIT_ANYTHING2REAL_LORA_FILE)
+            gdown.download.assert_called_once_with(link, os.path.join(tmp, u.CIVIT_ANYTHING2REAL_LORA_FILE), fuzzy=True, quiet=False)
+            aria.assert_not_called()
+        self.assertEqual(u.resolve_lora_selection(u.LEGACY_CIVIT_ANYTHING2REAL_LORA_FILE), u.CIVIT_ANYTHING2REAL_LORA_FILE)
+
+    def test_drive_download_failure_gives_actionable_message(self):
+        u = self.utils
+        gdown = types.ModuleType('gdown'); gdown.download = mock.Mock(return_value=None)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(sys.modules, {'gdown': gdown}):
+            with self.assertRaisesRegex(RuntimeError, 'shared with anyone'):
+                u.download_lora_multisource(u.PRESET_LORA_REGISTRY[u.CIVIT_ANYTHING2REAL_LORA_FILE]['url'], tmp, u.CIVIT_ANYTHING2REAL_LORA_FILE)
+
+    def test_default_strengths_and_overrides(self):
+        u = self.utils
+        expected = {u.LIGHTNING_LORA_FILE: 0.7, u.ANYTHING2REAL_LORA_FILE: 0.8,
+                    u.CIVIT_ANYTHING2REAL_LORA_FILE: 0.8, u.RESTORE_LORA_FILE: 0.7,
+                    u.CONSISTENCY_LORA_FILE: 0.8, u.EXPOSURE_LORA_FILE: 0.8, u.BFS_HEAD_LORA_FILE: 1.0}
+        for name, value in expected.items():
+            active = u.collect_active_loras([(name, '', -1)])
+            self.assertEqual(active[0]['strength_model'], value)
+            self.assertEqual(active[0]['strength_clip'], value)
+            self.assertEqual(u.collect_active_loras([(name, '', 0.55)])[0]['strength_model'], 0.55)
+            self.assertEqual(u.collect_active_loras([(name, '', 0)]), [])
+        self.assertEqual(u.collect_active_loras([('Custom (Enter filename below)', 'my.safetensors', -1)])[0]['strength_model'], 1.0)
+        with self.assertRaises(ValueError):
+            u.collect_active_loras([(u.RESTORE_LORA_FILE, '', -0.5)])
+
+    def test_drive_storage_links_and_prevents_data_loss(self):
+        u = self.utils
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = Path(tmp) / 'engine'
+            output = Path(tmp) / 'output'
+            root = Path(tmp) / 'drive'
+            for sub in ('diffusion_models', 'text_encoders', 'vae', 'loras'):
+                (engine / 'models' / sub).mkdir(parents=True)
+            (engine / 'models' / 'loras' / 'put_loras_here').touch()
+            output.mkdir()
+            u.configure_drive_storage(str(engine), str(output), str(root), True, True)
+            self.assertTrue((engine / 'models' / 'loras').is_symlink())
+            (engine / 'models' / 'loras' / 'new.safetensors').write_bytes(b'test')
+            self.assertEqual((root / 'models' / 'loras' / 'new.safetensors').read_bytes(), b'test')
+            (output / 'result.png').write_bytes(b'image')
+            self.assertEqual((root / 'output' / 'result.png').read_bytes(), b'image')
+            u.configure_drive_storage(str(engine), str(output), str(root), True, True)
+            with self.assertRaisesRegex(RuntimeError, 'linked elsewhere'):
+                u.configure_drive_storage(str(engine), str(output), str(root / 'other'), True, True)
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = Path(tmp) / 'engine'; output = Path(tmp) / 'output'; root = Path(tmp) / 'drive'
+            for sub in ('diffusion_models', 'text_encoders', 'vae', 'loras'):
+                (engine / 'models' / sub).mkdir(parents=True)
+            important = engine / 'models' / 'vae' / 'existing.safetensors'; important.write_bytes(b'data')
+            with self.assertRaisesRegex(RuntimeError, 'contains existing files'):
+                u.configure_drive_storage(str(engine), str(output), str(root), True, True)
+            self.assertEqual(important.read_bytes(), b'data')
+            self.assertFalse((engine / 'models' / 'diffusion_models').is_symlink())
+
+    def test_drive_model_download_uses_sequential_stream(self):
         u = self.utils
         with tempfile.TemporaryDirectory() as tmp, \
-             mock.patch.object(u.requests, 'get') as lookup, \
-             mock.patch.object(u, 'verify_safetensors_file', side_effect=[(False, 0, 'missing'), (True, 304, 'ok'), (True, 304, 'ok')]), \
-             mock.patch.object(u.subprocess, 'run', return_value=types.SimpleNamespace(returncode=0)) as run:
-            u.download_lora_multisource(u.PRESET_LORA_REGISTRY[u.CIVIT_ANYTHING2REAL_LORA_FILE]['url'], tmp, u.CIVIT_ANYTHING2REAL_LORA_FILE)
-            self.assertEqual(run.call_args.args[0][-1], 'https://civitai.com/api/download/models/3363600')
-            lookup.assert_not_called()
-            self.assertIn('3363600', u.CIVIT_ANYTHING2REAL_LORA_FILE)
+             mock.patch.object(u, 'is_drive_storage', return_value=True), \
+             mock.patch.object(u, 'stream_download') as stream, \
+             mock.patch.object(u.subprocess, 'run') as aria, \
+             mock.patch.object(u, 'verify_safetensors_file', side_effect=[(False, 0, 'missing'), (True, 2, 'ok'), (True, 2, 'ok')]):
+            u.download_lora_multisource('https://huggingface.co/user/model/resolve/main/a.safetensors', tmp, 'a.safetensors')
+            stream.assert_called_once()
+            aria.assert_not_called()
+
+    def test_base_download_streams_directly_to_drive(self):
+        import subprocess
+        setup = next(source(c) for c in self.nb['cells'] if source(c).startswith('# @title 1.'))
+        tree = ast.parse(setup)
+        func = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == 'foolproof_download')
+        module = ast.fix_missing_locations(ast.Module(body=[func], type_ignores=[]))
+        stream = mock.Mock()
+        verify = mock.Mock(side_effect=[(False, 0, 'missing'), (True, 7000, 'ok')])
+        env = {'os': os, 'subprocess': subprocess, 'time': __import__('time'),
+               'is_drive_storage': lambda p: True, 'stream_download': stream, 'verify_safetensors_file': verify}
+        exec(compile(module, 'setup_function', 'exec'), env)
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(subprocess, 'run') as aria:
+            result = env['foolproof_download']('https://example.com/model', tmp, 'model.safetensors')
+            self.assertEqual(result, ('downloaded', 7000))
+            stream.assert_called_once_with('https://example.com/model', os.path.join(tmp, 'model.safetensors'))
+            aria.assert_not_called()
+
+    def test_drive_storage_allows_mount_only_and_refuses_silent_switch(self):
+        u = self.utils
+        with tempfile.TemporaryDirectory() as tmp:
+            engine = Path(tmp) / 'engine'; output = Path(tmp) / 'output'; root = Path(tmp) / 'drive'
+            u.configure_drive_storage(str(engine), str(output), str(root), False, False)
+            self.assertFalse(root.exists())
+            u.configure_drive_storage(str(engine), str(output), str(root), True, True)
+            with mock.patch.object(u, 'is_drive_storage', return_value=True):
+                with self.assertRaisesRegex(RuntimeError, 'fresh runtime'):
+                    u.configure_drive_storage(str(engine), str(output), None, False, False)
+            self.assertTrue((engine / 'models' / 'loras').is_symlink())
+            self.assertTrue(output.is_symlink())
 
     def test_trigger_insertion_and_four_slot_chain(self):
         u = self.utils
@@ -98,7 +193,7 @@ class NotebookTests(unittest.TestCase):
 
     def test_new_presets_are_available_in_all_four_slots(self):
         u = self.utils
-        for cell in self.nb['cells'][5:8]:
+        for cell in [c for c in self.nb['cells'] if source(c).startswith(('# @title 5.', '# @title 6.', '# @title 6B.'))]:
             src = source(cell)
             for slot in ('primary', 'secondary', 'tertiary', 'quaternary'):
                 row = next(line for line in src.splitlines() if line.startswith(slot + '_lora = '))
@@ -116,7 +211,7 @@ class NotebookTests(unittest.TestCase):
         u.ensure_loras_downloaded = lambda loras: None
         seen = []
         u.execute_comfy_generation = lambda wf, *args, **kwargs: seen.append(copy.deepcopy(wf))
-        head = source(self.nb['cells'][6])
+        head = next(source(c) for c in self.nb['cells'] if source(c).startswith('# @title 6.'))
         head = head.replace('seed = -1 # @param', 'seed = 123 # @param')
         head = head.replace('tertiary_lora = "None" # @param', f'tertiary_lora = "{u.EXPOSURE_LORA_FILE}" # @param')
         head = head.replace('quaternary_lora = "None" # @param', f'quaternary_lora = "{u.CIVIT_ANYTHING2REAL_LORA_FILE}" # @param')
@@ -129,6 +224,8 @@ class NotebookTests(unittest.TestCase):
         self.assertIn('transform the image to realistic photograph', prompt)
         self.assertEqual(prompt.count('head_swap:'), 1)
         self.assertIn('lora_loader_3', wf)
+        self.assertEqual(wf['lora_loader_2']['inputs']['strength_model'], 0.8)
+        self.assertEqual(wf['lora_loader_3']['inputs']['strength_model'], 0.8)
         cfg = namespace['_CELL6_LAST_CONFIG']
         self.assertEqual(cfg['tertiary_lora'], u.EXPOSURE_LORA_FILE)
         self.assertEqual(cfg['quaternary_lora'], u.CIVIT_ANYTHING2REAL_LORA_FILE)
@@ -137,7 +234,7 @@ class NotebookTests(unittest.TestCase):
         captured = []
         u.execute_batch_head_swap_6b = lambda **kwargs: captured.append(kwargs)
         with mock.patch.dict(sys.modules, {'qwen_studio_utils': u}):
-            exec(compile(source(self.nb['cells'][7]), 'head_batch', 'exec'), namespace)
+            exec(compile(next(source(c) for c in self.nb['cells'] if source(c).startswith('# @title 6B.')), 'head_batch', 'exec'), namespace)
         batch = captured[0]
         self.assertEqual(batch['base_seed'], 123)
         self.assertEqual([x['name'] for x in batch['active_loras']], [u.BFS_HEAD_LORA_FILE, u.EXPOSURE_LORA_FILE, u.CIVIT_ANYTHING2REAL_LORA_FILE])
@@ -291,7 +388,7 @@ class NotebookTests(unittest.TestCase):
     def test_edit_random_seeds_are_unique_and_reach_turbo_workflows(self):
         import random
         u = self.utils
-        cell = source(self.nb['cells'][5])
+        cell = next(source(c) for c in self.nb['cells'] if source(c).startswith('# @title 5.'))
         cell = cell.replace('secondary_lora = "None" # @param', f'secondary_lora = "{u.LIGHTNING_LORA_FILE}" # @param')
         img = Image.new('RGB', (100, 120))
         u.load_multiple_raw_images = lambda **kwargs: [(f'{i}.png', img) for i in range(3)]
@@ -319,7 +416,7 @@ class NotebookTests(unittest.TestCase):
 
     def test_edit_rejects_invalid_seed_before_loading_images(self):
         u = self.utils
-        cell = source(self.nb['cells'][5]).replace('seed = -1 # @param', 'seed = -2 # @param')
+        cell = next(source(c) for c in self.nb['cells'] if source(c).startswith('# @title 5.')).replace('seed = -1 # @param', 'seed = -2 # @param')
         u.load_multiple_raw_images = mock.Mock()
         with mock.patch.dict(sys.modules, {'qwen_studio_utils': u}):
             with self.assertRaisesRegex(ValueError, 'Seed must be'):
