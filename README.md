@@ -30,13 +30,23 @@ The v2 notebook is an **image-editing and head-swap** workflow; it no longer inc
 
 1. Run **1. Environment Setup & Model Synchronization** on a Colab GPU runtime. Optionally run **2. Preset LoRAs** to pre-download adapters.
 2. Run **5. Multi-Image Editing** to edit one or more independent images, with no face swap or reference image. Select multiple files or a ZIP in the upload dialog, or enter comma-separated image paths/URLs, a folder, or a local ZIP path. For multiple upload dialogs, enable `upload_in_multiple_dialogs`; cancel the next dialog when finished.
-3. Set one prompt, negative prompt, LoRAs, dimensions and sampler settings for the batch. Images are processed **one at a time**, with individual output dimensions calculated from each input by default (subject to 32-pixel alignment and size limits). Fast mode overrides the selected dimension mode. A fixed seed is reused for all images; `-1` draws one random seed for the entire batch.
+3. Set one prompt, negative prompt, LoRAs, dimensions and sampler settings for the batch. Images are processed **one at a time**, with individual output dimensions calculated from each input by default (subject to 32-pixel alignment and size limits). Fast mode overrides the selected dimension mode. A fixed seed is reused for all images; `-1` draws a different random seed for each image. The seed is shown with each result so it can be reused.
 4. Results are saved to `/content/output/`. Enable `create_batch_zip_download` to create a ZIP there; the summary reports failed inputs while continuing with the remaining images. If every edit fails, the cell raises an error. Re-running creates new output filenames.
-5. **6. Dedicated Head Swap** and **6B. Batch Head Swap** remain separate, reference-image-based workflows and are unchanged by batch editing.
+5. **6. Dedicated Head Swap** and **6B. Batch Head Swap** remain separate, reference-image-based workflows. In 6B, `-1` gives each target a different random seed; a fixed seed increments by one for each target.
 
-### Civit Anything2Real preset (v2)
+### Four LoRA slots and presets (v2)
 
-Select `civit_anything2real_qwen21.safetensors` as a primary or secondary LoRA in the edit cell, or enable `download_civit_anything2real` in cell 2. The [Civitai listing](https://civitai.com/models/2808492/anything2realcharacters) contains multiple base-model versions; the notebook looks up the **Qwen 2.1** version and refuses incompatible versions. This is a separate source/preset from the existing Hugging Face `Qwen2.1_Anything2RealCharacters.safetensors` preset, and may contain the same model weights. Civitai access may require a `CIVITAI_TOKEN` Colab Secret (or the token field in cell 2); downloading requires permission to access the model.
+All three v2 inference cells offer **primary, secondary, tertiary, and quaternary** slots, each with a custom filename/URL and strength. Select `None` or set strength to zero to disable a slot. Duplicate adapters and combinations of Lightning with Viggle Turbo are rejected. The Viggle merged model occupies a slot and replaces the UNET at full strength, rather than acting as a blendable LoRA. Four adapters can increase memory use; results from stacking are not guaranteed. Cell 6B can inherit the additional slots and trigger setting from Cell 6; turn inheritance off to use only the settings shown in Cell 6B.
+
+| Preset | Source / usage | Automatic trigger |
+| --- | --- | --- |
+| `civit_anything2real_qwen21_v3363600.safetensors` | [Civitai version 3363600](https://civitai.com/api/download/models/3363600), separate from the existing Hugging Face preset | `photorealistic`, `transform the image to realistic photograph` |
+| `qwen-image-2.1-restore.safetensors` | [Restore / skin](https://huggingface.co/ausboss/Qwen-Image-2.1-Restore-LoRA); the author recommends 1.0 for in-focus images and 0.5 for blurry photos | None required |
+| `Qwen-Image-2.1-Natural-Exposure-LoRA-4000.safetensors` | [Natural Exposure](https://huggingface.co/prithivMLmods/Qwen-Image-2.1-Natural-Exposure-LoRA), an experimental model | `Transform the image with balanced neutral exposure` |
+| `qwen-image-2.1-consistency.safetensors` | [Consistency](https://huggingface.co/ausboss/Qwen-Image-2.1-Consistency-LoRA); may resist pose or head movement | None required |
+| `bfs_head_v1.1_qwen_2.1.safetensors` | [Head swap](https://huggingface.co/Alissonerdx/BFS-Best-Face-Swap/blob/main/docs/qwen-image-2.1.md), with target and reference images in cells 6/6B | `head_swap:` (already in the head-swap prompt) |
+
+`auto_add_lora_triggers` is enabled by default. It adds only missing documented triggers for nonzero-strength selected presets; turn it off to use the prompt exactly as typed. Restore and Consistency have no required trigger according to their model cards. Triggers for custom LoRAs must be added manually. In cell 2, the new download checkboxes are optional; missing selected presets also download when needed. Civitai may require a `CIVITAI_TOKEN` Colab Secret or the token field in cell 2. Version 3363600 uses a new filename so an older cached Civitai download is not reused.
 
 For local, GPU-free checks, install Pillow, requests, and websocket-client, then run `python -m unittest discover -s tests -v`. These tests mock the downloader and inference; they do not replace a full Colab GPU run.
 
