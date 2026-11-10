@@ -22,6 +22,26 @@ Click the badge below to directly open the notebook in Google Colab:
 
 ---
 
+## 🆕 Qwen-Image-2.1 Studio v2
+
+[![Open v2 in Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/AadishY/Collab/blob/main/Qwen_Image_2_1_v2.ipynb)
+
+The v2 notebook is an **image-editing and head-swap** workflow; it no longer includes text-to-image generation. The rest of this README describes the original notebook unless marked v2.
+
+1. Run **1. Environment Setup & Model Synchronization** on a Colab GPU runtime. Optionally run **2. Preset LoRAs** to pre-download adapters.
+2. Run **5. Multi-Image Editing** to edit one or more independent images, with no face swap or reference image. Select multiple files or a ZIP in the upload dialog, or enter comma-separated image paths/URLs, a folder, or a local ZIP path. For multiple upload dialogs, enable `upload_in_multiple_dialogs`; cancel the next dialog when finished.
+3. Set one prompt, negative prompt, LoRAs, dimensions and sampler settings for the batch. Images are processed **one at a time**, with individual output dimensions calculated from each input by default (subject to 32-pixel alignment and size limits). Fast mode overrides the selected dimension mode. A fixed seed is reused for all images; `-1` draws one random seed for the entire batch.
+4. Results are saved to `/content/output/`. Enable `create_batch_zip_download` to create a ZIP there; the summary reports failed inputs while continuing with the remaining images. If every edit fails, the cell raises an error. Re-running creates new output filenames.
+5. **6. Dedicated Head Swap** and **6B. Batch Head Swap** remain separate, reference-image-based workflows and are unchanged by batch editing.
+
+### Civit Anything2Real preset (v2)
+
+Select `civit_anything2real_qwen21.safetensors` as a primary or secondary LoRA in the edit cell, or enable `download_civit_anything2real` in cell 2. The [Civitai listing](https://civitai.com/models/2808492/anything2realcharacters) contains multiple base-model versions; the notebook looks up the **Qwen 2.1** version and refuses incompatible versions. This is a separate source/preset from the existing Hugging Face `Qwen2.1_Anything2RealCharacters.safetensors` preset, and may contain the same model weights. Civitai access may require a `CIVITAI_TOKEN` Colab Secret (or the token field in cell 2); downloading requires permission to access the model.
+
+For local, GPU-free checks, install Pillow, requests, and websocket-client, then run `python -m unittest discover -s tests -v`. These tests mock the downloader and inference; they do not replace a full Colab GPU run.
+
+---
+
 ## ✨ Studio Capabilities
 
 | Studio Cell | Task | Primary Model / LoRA | Description |
