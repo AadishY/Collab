@@ -72,7 +72,8 @@ class NotebookTests(unittest.TestCase):
 
     def test_default_strengths_and_overrides(self):
         u = self.utils
-        expected = {u.LIGHTNING_LORA_FILE: 0.7, u.ANYTHING2REAL_LORA_FILE: 0.8,
+        expected = {u.DMD2_2STEP_LORA_FILE: 1.0, u.DETAIL_ENHANCER_LORA_FILE: 1.0,
+                    u.LIGHTNING_LORA_FILE: 0.7, u.ANYTHING2REAL_LORA_FILE: 0.8,
                     u.CIVIT_ANYTHING2REAL_LORA_FILE: 0.8, u.RESTORE_LORA_FILE: 0.7,
                     u.CONSISTENCY_LORA_FILE: 0.8, u.EXPOSURE_LORA_FILE: 0.8, u.BFS_HEAD_LORA_FILE: 1.0}
         for name, value in expected.items():
@@ -197,9 +198,147 @@ class NotebookTests(unittest.TestCase):
             src = source(cell)
             for slot in ('primary', 'secondary', 'tertiary', 'quaternary'):
                 row = next(line for line in src.splitlines() if line.startswith(slot + '_lora = '))
-                for name in (u.CIVIT_ANYTHING2REAL_LORA_FILE, u.RESTORE_LORA_FILE, u.EXPOSURE_LORA_FILE, u.CONSISTENCY_LORA_FILE):
+                for name in (u.CIVIT_ANYTHING2REAL_LORA_FILE, u.DETAIL_ENHANCER_LORA_FILE, u.DMD2_2STEP_LORA_FILE,
+                             u.RESTORE_LORA_FILE, u.EXPOSURE_LORA_FILE, u.CONSISTENCY_LORA_FILE):
                     self.assertIn(name, row)
             self.assertIn('add_lora_triggers(', src)
+        cell2 = next(source(c) for c in self.nb['cells'] if source(c).startswith('# @title 2.'))
+        self.assertIn('DMD2_2STEP_LORA_FILE', cell2)
+        self.assertIn('DETAIL_ENHANCER_LORA_FILE', cell2)
+
+    def test_dmd2_2step_default_settings_and_fixed_sigmas(self):
+        u = self.utils
+        reg = u.PRESET_LORA_REGISTRY[u.DMD2_2STEP_LORA_FILE]
+        self.assertEqual(
+            reg['url'],
+            'https://huggingface.co/linoyts/Qwen-Image-2.1-DMD2-2steps/resolve/main/pytorch_lora_weights_v1_5.safetensors',
+        )
+        self.assertEqual(reg['steps'], 2)
+        self.assertEqual(reg['cfg'], 1.0)
+        self.assertEqual(reg['sampler'], 'euler')
+        self.assertEqual(reg['nodes'], '1.0, 0.5')
+        self.assertFalse(reg['use_dynamic_shifting'])
+
+        active = u.collect_active_loras([(u.DMD2_2STEP_LORA_FILE, '', -1)])
+        self.assertEqual(active[0]['strength_model'], 1.0)
+        steps, cfg, sampler, accel = u.optimize_sampling_for_active_loras(active, 20, 2.5, 'heun', auto_optimize=True)
+        self.assertEqual((steps, cfg, sampler), (2, 1.0, 'euler'))
+        self.assertEqual(accel['mode'], 'dmd2_2step')
+        self.assertEqual(accel['sigmas_nodes'], '1.0, 0.5')
+        self.assertFalse(accel['use_dynamic_shifting'])
+        self.assertEqual((accel['base_shift'], accel['max_shift']), (0.0, 0.0))
+
+        # Even with auto_optimize=False, DMD2 2-step uses its 2-step fixed schedule and CFG=1.0
+        steps2, cfg2, sampler2, _ = u.optimize_sampling_for_active_loras(active, 20, 2.5, 'heun', auto_optimize=False)
+        self.assertEqual((steps2, cfg2, sampler2), (2, 1.0, 'euler'))
+
+        wf = {
+            'unet_loader': {'inputs': {}, 'class_type': 'UNETLoader'},
+            'qwen_cache': {'inputs': {'model': ['unet_loader', 0]}, 'class_type': 'QwenImage21Cache'},
+            'text_encode_edit': {'inputs': {'images.image_1': ['load_input_image', 0], 'negative_prompt': 'bad'}, 'class_type': 'TextEncodeQwenImage21'},
+            'ksampler': {'inputs': {'seed': 777, 'steps': 2, 'positive': ['text_encode_edit', 0], 'latent_image': ['empty_latent', 0], 'model': ['qwen_cache', 0]}, 'class_type': 'KSampler'},
+        }
+        model, clip = u.build_lora_chain(wf, active, ['unet_loader', 0], ['clip_loader', 0], check_disk=False)
+        wf['qwen_cache']['inputs']['model'] = model
+        self.assertEqual(wf['lora_loader_1']['inputs']['strength_model'], 1.0)
+        self.assertEqual(wf['lora_loader_1']['inputs']['strength_clip'], 0.0)
+        u.apply_acceleration_to_workflow(wf, active, steps=steps, cfg=cfg, sampler_name=sampler)
+        self.assertNotIn('qwen_cache', wf)
+        self.assertEqual(wf['text_encode_edit']['inputs']['negative_prompt'], '')
+        self.assertEqual(wf['turbo_sigmas']['inputs']['nodes'], '1.0, 0.5')
+        self.assertEqual(wf['turbo_sigmas']['inputs']['base_shift'], 0.0)
+        self.assertEqual(wf['turbo_sigmas']['inputs']['max_shift'], 0.0)
+        self.assertEqual(wf['ksampler']['class_type'], 'SamplerCustomAdvanced')
+        self.assertEqual(wf['ksampler']['_meta']['scheduler'], 'dmd2_2step (2 steps)')
+        self.assertEqual(u.format_active_loras_badge(active), '1 Active (⚡ DMD2 2-Step)')
+
+        with self.assertRaisesRegex(ValueError, 'either Lightning or Viggle'):
+            u.collect_active_loras([(u.DMD2_2STEP_LORA_FILE, '', 1), (u.LIGHTNING_LORA_FILE, '', 1)])
+        with self.assertRaisesRegex(ValueError, 'either Lightning or Viggle'):
+            u.collect_active_loras([(u.DMD2_2STEP_LORA_FILE, '', 1), (u.VIGGLE_TURBO_UNET_FILE, '', 1)])
+
+    def test_custom_turbo_sigmas_node_fixed_and_shifted_schedules(self):
+        u = self.utils
+        fake_torch = types.ModuleType('torch')
+        fake_torch.float32 = 'float32'
+        fake_torch.Tensor = list
+        fake_torch.tensor = lambda data, **kwargs: list(data)
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(u, 'get_engine_dir', return_value=tmp), \
+             mock.patch.object(u.urllib.request, 'urlopen', side_effect=OSError('offline')), \
+             mock.patch.dict(sys.modules, {'torch': fake_torch}):
+            node_file = Path(tmp) / 'custom_nodes' / 'qwen_turbo_nodes.py'
+            node_file.parent.mkdir(parents=True, exist_ok=True)
+            node_file.write_text('# outdated content', encoding='utf-8')
+            u.ensure_custom_nodes_installed()
+            code = node_file.read_text(encoding='utf-8')
+            self.assertIn('class QwenTurboSigmas', code)
+            mod = types.ModuleType('qwen_turbo_nodes')
+            exec(compile(code, str(node_file), 'exec'), mod.__dict__)
+            node = mod.QwenTurboSigmas()
+            # DMD2 2-Step: fixed sigmas [1.0, 0.5, 0.0] with no dynamic shifting (base_shift=0.0, max_shift=0.0)
+            fixed_sigmas, = node.get_sigmas({'samples': None}, nodes='1.0, 0.5', base_shift=0.0, max_shift=0.0)
+            self.assertEqual(fixed_sigmas, [1.0, 0.5, 0.0])
+            # Lightning 4-Step: dynamic shifted sigmas (base_shift=0.5, max_shift=0.9)
+            shifted_sigmas, = node.get_sigmas({'samples': None}, nodes='1.0, 0.75, 0.5, 0.25', base_shift=0.5, max_shift=0.9)
+            self.assertEqual(len(shifted_sigmas), 5)
+            self.assertEqual(shifted_sigmas[0], 1.0)
+            self.assertEqual(shifted_sigmas[-1], 0.0)
+            self.assertGreater(shifted_sigmas[2], 0.5)
+
+    def test_detail_enhancer_default_prompt_and_dmd2_combo_in_cell5(self):
+        u = self.utils
+        expected_prompt = (
+            'Enhance this image to high resolution with rich fine details. '
+            'Sharpen textures and surfaces, add natural microdetails, and improve clarity '
+            'and definition across the image while preserving the original composition, '
+            'lighting, atmosphere, and visual style; preserve the original style.'
+        )
+        self.assertEqual(u.DETAIL_ENHANCER_DEFAULT_PROMPT, expected_prompt)
+        self.assertEqual(
+            u.PRESET_LORA_REGISTRY[u.DETAIL_ENHANCER_LORA_FILE]['url'],
+            'https://huggingface.co/reverentelusarca/elusarcas-qwen-2.1-detail-enhancer-lora/resolve/main/elusarcas-qwen2-1-detailer-v1.safetensors',
+        )
+
+        # Selecting Detail Enhancer as primary LoRA in Cell 5 replaces the untouched Anything2Real default prompt
+        cell = next(source(c) for c in self.nb['cells'] if source(c).startswith('# @title 5.'))
+        cell = cell.replace(
+            'primary_lora = "Qwen2.1_Anything2RealCharacters.safetensors" # @param',
+            f'primary_lora = "{u.DETAIL_ENHANCER_LORA_FILE}" # @param',
+        )
+        cell = cell.replace(
+            'secondary_lora = "None" # @param',
+            f'secondary_lora = "{u.DMD2_2STEP_LORA_FILE}" # @param',
+        )
+        img = Image.new('RGB', (100, 120))
+        u.load_multiple_raw_images = lambda **kwargs: [('sample.png', img)]
+        u.save_processed_image = lambda image, name, **kwargs: (name, 100, 120)
+        u.ensure_loras_downloaded = lambda active: None
+        u.purge_backend_memory = lambda **kwargs: None
+        seen = []
+        def generate(wf, title, w, h, seed, summary, **kwargs):
+            seen.append((copy.deepcopy(wf), summary))
+            return [img]
+        generate.last_saved_paths = []
+        u.execute_comfy_generation = generate
+        with tempfile.TemporaryDirectory() as tmp, \
+             mock.patch.object(u, 'get_output_dir', return_value=tmp), \
+             mock.patch.dict(sys.modules, {'qwen_studio_utils': u}):
+            namespace = {}
+            exec(compile(cell, 'detail_enhancer_dmd2', 'exec'), namespace)
+
+        self.assertEqual(len(seen), 1)
+        wf, summary = seen[0]
+        self.assertEqual(wf['text_encode_edit']['inputs']['prompt'], expected_prompt)
+        self.assertEqual(wf['lora_loader_1']['inputs']['lora_name'], u.DETAIL_ENHANCER_LORA_FILE)
+        self.assertEqual(wf['lora_loader_1']['inputs']['strength_model'], 1.0)
+        self.assertEqual(wf['lora_loader_2']['inputs']['lora_name'], u.DMD2_2STEP_LORA_FILE)
+        self.assertEqual(wf['lora_loader_2']['inputs']['strength_model'], 1.0)
+        self.assertEqual(wf['lora_loader_2']['inputs']['strength_clip'], 0.0)
+        self.assertEqual(wf['turbo_sigmas']['inputs']['nodes'], '1.0, 0.5')
+        self.assertEqual(wf['turbo_sigmas']['inputs']['base_shift'], 0.0)
+        self.assertEqual(wf['turbo_sigmas']['inputs']['max_shift'], 0.0)
+        self.assertIn('DMD2 2-Step', summary)
 
     def test_headswap_four_slots_and_inheritance(self):
         u = self.utils
